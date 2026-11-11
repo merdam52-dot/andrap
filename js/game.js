@@ -1,14 +1,17 @@
 (() => {
   "use strict";
 
-  const BEST_KEY = "presa_best";
+  const BEST_KEY = "presa_best_v2";
 
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d", { alpha: false });
   const hud = document.getElementById("hud");
   const timerEl = document.getElementById("timer");
+  const hungerBar = document.getElementById("hunger-bar");
+  const noiseBar = document.getElementById("noise-bar");
   const screenMenu = document.getElementById("screen-menu");
   const screenDeath = document.getElementById("screen-death");
+  const deathCauseEl = document.getElementById("death-cause");
   const finalTimeEl = document.getElementById("final-time");
   const bestTimeEl = document.getElementById("best-time");
   const btnPlay = document.getElementById("btn-play");
@@ -19,20 +22,36 @@
     w: 0,
     h: 0,
     dpr: 1,
-    player: { x: 0, y: 0, r: 14, tx: 0, ty: 0, dragging: false },
-    threats: [],
+    player: {
+      x: 0,
+      y: 0,
+      r: 10,
+      tx: 0,
+      ty: 0,
+      dragging: false,
+      hunger: 1,
+      noise: 0,
+      speed: 0,
+    },
+    loot: [],
+    infected: [],
+    ruins: [],
     elapsed: 0,
     best: Number(localStorage.getItem(BEST_KEY) || 0),
     shake: 0,
     flash: 0,
-    lastSpawn: 0,
-    spawnInterval: 1.05,
+    heartbeat: 0,
     deathT: 0,
+    deathCause: "Você não voltou",
+    vision: 118,
+    lastLootPulse: 0,
+    tensionNear: 0,
     raf: 0,
     lastTs: 0,
   };
 
   let audioCtx = null;
+  let ambience = null;
 
   function ensureAudio() {
     if (!audioCtx) {
@@ -42,14 +61,16 @@
     if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
   }
 
-  function beep({ freq = 180, dur = 0.12, type = "square", gain = 0.05, slide = 0 }) {
+  function beep({ freq = 180, dur = 0.12, type = "sine", gain = 0.04, slide = 0 }) {
     if (!audioCtx) return;
     const t0 = audioCtx.currentTime;
     const osc = audioCtx.createOscillator();
     const g = audioCtx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, t0);
-    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t0 + dur);
+    if (slide) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t0 + dur);
+    }
     g.gain.setValueAtTime(gain, t0);
     g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
     osc.connect(g);
@@ -58,8 +79,45 @@
     osc.stop(t0 + dur + 0.02);
   }
 
+  function startAmbience() {
+    if (!audioCtx || ambience) return;
+    const bufferSize = 2 * audioCtx.sampleRate;
+    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.4;
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = noiseBuffer;
+    src.loop = true;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 280;
+    const g = audioCtx.createGain();
+    g.gain.value = 0.012;
+    src.connect(filter);
+    filter.connect(g);
+    g.connect(audioCtx.destination);
+    src.start();
+    ambience = { src, g, filter };
+  }
+
+  function stopAmbience() {
+    if (!ambience) return;
+    try {
+      ambience.src.stop();
+    } catch (_) {}
+    ambience = null;
+  }
+
   function haptic(pattern) {
     if (navigator.vibrate) navigator.vibrate(pattern);
+  }
+
+  function formatTime(sec) {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${r.toString().padStart(2, "0")}`;
   }
 
   function resize() {
@@ -72,6 +130,7 @@
     canvas.style.width = `${state.w}px`;
     canvas.style.height = `${state.h}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    state.vision = Math.min(state.w, state.h) * 0.28;
   }
 
   function showScreen(which) {
@@ -82,86 +141,120 @@
     hud.hidden = which !== "play";
   }
 
-  function resetPlayer() {
-    const p = state.player;
-    p.x = state.w * 0.5;
-    p.y = state.h * 0.55;
-    p.tx = p.x;
-    p.ty = p.y;
-    p.dragging = false;
-    p.r = Math.max(12, Math.min(16, state.w * 0.035));
+  function rand(a, b) {
+    return a + Math.random() * (b - a);
+  }
+
+  function placeAway(fromX, fromY, minDist) {
+    let x;
+    let y;
+    let tries = 0;
+    do {
+      x = rand(40, state.w - 40);
+      y = rand(80, state.h - 80);
+      tries++;
+    } while (Math.hypot(x - fromX, y - fromY) < minDist && tries < 40);
+    return { x, y };
+  }
+
+  function buildRuins() {
+    state.ruins = [];
+    const n = 5 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < n; i++) {
+      const p = placeAway(state.w * 0.5, state.h * 0.55, 60);
+      state.ruins.push({
+        x: p.x,
+        y: p.y,
+        w: rand(28, 70),
+        h: rand(18, 42),
+        rot: rand(-0.2, 0.2),
+      });
+    }
+  }
+
+  function spawnLoot(count) {
+    for (let i = 0; i < count; i++) {
+      const p = placeAway(state.player.x, state.player.y, 90);
+      state.loot.push({
+        x: p.x,
+        y: p.y,
+        kind: Math.random() < 0.72 ? "food" : "med",
+        taken: false,
+        pulse: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  function spawnInfected(count) {
+    for (let i = 0; i < count; i++) {
+      const p = placeAway(state.player.x, state.player.y, 160);
+      state.infected.push({
+        x: p.x,
+        y: p.y,
+        r: 11,
+        vx: 0,
+        vy: 0,
+        alert: 0,
+        wanderT: rand(0, 4),
+        wanderAngle: rand(0, Math.PI * 2),
+        speedWalk: rand(18, 28),
+        speedChase: rand(42, 58),
+      });
+    }
   }
 
   function startGame() {
     ensureAudio();
+    startAmbience();
     state.mode = "play";
-    state.threats = [];
     state.elapsed = 0;
-    state.lastSpawn = 0;
-    state.spawnInterval = 1.05;
     state.shake = 0;
     state.flash = 0;
+    state.heartbeat = 0;
     state.deathT = 0;
-    resetPlayer();
+    state.tensionNear = 0;
+    state.loot = [];
+    state.infected = [];
+
+    const p = state.player;
+    p.x = state.w * 0.5;
+    p.y = state.h * 0.58;
+    p.tx = p.x;
+    p.ty = p.y;
+    p.dragging = false;
+    p.hunger = 1;
+    p.noise = 0;
+    p.speed = 0;
+    p.r = Math.max(9, Math.min(12, state.w * 0.028));
+
+    buildRuins();
+    spawnLoot(5);
+    spawnInfected(2);
+
     showScreen("play");
-    timerEl.textContent = "0.0";
-    beep({ freq: 220, dur: 0.08, type: "triangle", gain: 0.04 });
+    timerEl.textContent = "0:00";
+    updateVitalsUI();
+    beep({ freq: 110, dur: 0.25, type: "sine", gain: 0.03, slide: -40 });
   }
 
-  function edgePoint() {
-    const side = Math.floor(Math.random() * 4);
-    const m = 24;
-    if (side === 0) return { x: Math.random() * state.w, y: -m };
-    if (side === 1) return { x: state.w + m, y: Math.random() * state.h };
-    if (side === 2) return { x: Math.random() * state.w, y: state.h + m };
-    return { x: -m, y: Math.random() * state.h };
+  function updateVitalsUI() {
+    const h = Math.max(0, Math.min(1, state.player.hunger));
+    const n = Math.max(0, Math.min(1, state.player.noise));
+    hungerBar.style.transform = `scaleX(${h})`;
+    noiseBar.style.transform = `scaleX(${n})`;
+    hungerBar.classList.toggle("critical", h < 0.28);
   }
 
-  function spawnThreat() {
-    const start = edgePoint();
-    const targetBias = 0.55 + Math.random() * 0.35;
-    const aimX = state.player.x + (Math.random() - 0.5) * 80;
-    const aimY = state.player.y + (Math.random() - 0.5) * 80;
-    const dx = aimX - start.x;
-    const dy = aimY - start.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const speedBase = 95 + state.elapsed * 9 + Math.random() * 40;
-    const r = 7 + Math.random() * 10 + Math.min(6, state.elapsed * 0.15);
-    const rot = Math.random() * Math.PI * 2;
-    state.threats.push({
-      x: start.x,
-      y: start.y,
-      vx: (dx / len) * speedBase * targetBias,
-      vy: (dy / len) * speedBase * targetBias,
-      r,
-      rot,
-      spin: (Math.random() - 0.5) * 6,
-      age: 0,
-      born: 0,
-    });
-  }
-
-  function difficultyTick() {
-    // Spawn cadence tightens; occasional burst for pressure spikes
-    const t = state.elapsed;
-    state.spawnInterval = Math.max(0.28, 1.05 - t * 0.035);
-    if (t - state.lastSpawn >= state.spawnInterval) {
-      state.lastSpawn = t;
-      spawnThreat();
-      if (Math.random() < Math.min(0.45, 0.08 + t * 0.012)) spawnThreat();
-      beep({ freq: 90 + Math.random() * 40, dur: 0.05, type: "sawtooth", gain: 0.018, slide: -30 });
-    }
-  }
-
-  function kill() {
+  function kill(cause) {
     if (state.mode !== "play") return;
     state.mode = "dying";
+    state.deathCause = cause;
     state.deathT = 0;
-    state.shake = 18;
-    state.flash = 1;
-    haptic([40, 30, 80]);
-    beep({ freq: 140, dur: 0.18, type: "square", gain: 0.07, slide: -100 });
-    setTimeout(() => beep({ freq: 70, dur: 0.35, type: "sawtooth", gain: 0.05, slide: -40 }), 90);
+    state.shake = 14;
+    state.flash = 0.85;
+    haptic([50, 40, 90]);
+    beep({ freq: 90, dur: 0.28, type: "sawtooth", gain: 0.05, slide: -55 });
+    setTimeout(() => beep({ freq: 55, dur: 0.5, type: "sine", gain: 0.04, slide: -20 }), 120);
   }
 
   function finishDeath() {
@@ -170,9 +263,11 @@
       state.best = score;
       localStorage.setItem(BEST_KEY, String(score));
     }
-    finalTimeEl.textContent = score.toFixed(1);
-    bestTimeEl.textContent = state.best.toFixed(1);
+    deathCauseEl.textContent = state.deathCause;
+    finalTimeEl.textContent = formatTime(score);
+    bestTimeEl.textContent = formatTime(state.best);
     state.mode = "death";
+    stopAmbience();
     showScreen("death");
   }
 
@@ -204,93 +299,356 @@
     state.player.dragging = false;
   }
 
+  function nearestInfectedDist() {
+    let best = Infinity;
+    for (const z of state.infected) {
+      const d = Math.hypot(z.x - state.player.x, z.y - state.player.y);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  function updatePlayer(dt) {
+    const p = state.player;
+    const dx = p.tx - p.x;
+    const dy = p.ty - p.y;
+    const dist = Math.hypot(dx, dy);
+
+    // Deliberate walk — not twitch. Cap speed; drag distance = intent, not teleport.
+    const maxSpeed = 78;
+    let vx = 0;
+    let vy = 0;
+    if (p.dragging && dist > 6) {
+      const intent = Math.min(1, dist / 120);
+      const speed = maxSpeed * (0.35 + intent * 0.65);
+      vx = (dx / dist) * speed;
+      vy = (dy / dist) * speed;
+    }
+
+    p.x += vx * dt;
+    p.y += vy * dt;
+    p.x = Math.max(p.r + 8, Math.min(state.w - p.r - 8, p.x));
+    p.y = Math.max(p.r + 40, Math.min(state.h - p.r - 56, p.y));
+    p.speed = Math.hypot(vx, vy);
+
+    // Noise from movement; stillness lets you vanish.
+    if (p.speed > 8) {
+      p.noise = Math.min(1, p.noise + dt * (0.18 + p.speed / 140));
+    } else {
+      p.noise = Math.max(0, p.noise - dt * 0.35);
+    }
+
+    // Hunger always drains — scarcity clock.
+    const drain = 0.028 + state.elapsed * 0.00055;
+    p.hunger = Math.max(0, p.hunger - drain * dt);
+    if (p.hunger <= 0) {
+      kill("Morreu de fome");
+      return;
+    }
+
+    // Loot pickup
+    for (const item of state.loot) {
+      if (item.taken) continue;
+      if (Math.hypot(item.x - p.x, item.y - p.y) < p.r + 14) {
+        item.taken = true;
+        if (item.kind === "food") {
+          p.hunger = Math.min(1, p.hunger + 0.34);
+          beep({ freq: 240, dur: 0.08, type: "triangle", gain: 0.035 });
+          haptic(12);
+        } else {
+          p.hunger = Math.min(1, p.hunger + 0.12);
+          // Meds also quiet nerves slightly
+          p.noise = Math.max(0, p.noise - 0.25);
+          beep({ freq: 320, dur: 0.1, type: "sine", gain: 0.03 });
+          haptic(18);
+        }
+      }
+    }
+  }
+
+  function updateInfected(dt) {
+    const p = state.player;
+    let near = 0;
+
+    for (const z of state.infected) {
+      const dx = p.x - z.x;
+      const dy = p.y - z.y;
+      const dist = Math.hypot(dx, dy) || 1;
+
+      // Hearing radius grows with player noise and late-game pressure.
+      const hearRange = 70 + p.noise * 160 + Math.min(80, state.elapsed * 2.2);
+      const seeRange = 55 + Math.min(40, state.elapsed * 1.1);
+
+      const canHear = dist < hearRange && p.noise > 0.18;
+      const canSee = dist < seeRange;
+
+      if (canHear || canSee) {
+        z.alert = Math.min(1, z.alert + dt * 1.4);
+      } else {
+        z.alert = Math.max(0, z.alert - dt * 0.45);
+      }
+
+      if (z.alert > 0.35) {
+        // Slow, relentless chase — DayZ shambler, not bullet hell.
+        const spd = z.speedChase * (0.7 + z.alert * 0.4);
+        z.vx = (dx / dist) * spd;
+        z.vy = (dy / dist) * spd;
+        if (dist < 130) near = Math.max(near, 1 - dist / 130);
+      } else {
+        z.wanderT -= dt;
+        if (z.wanderT <= 0) {
+          z.wanderT = rand(2.2, 5);
+          z.wanderAngle = rand(0, Math.PI * 2);
+        }
+        z.vx = Math.cos(z.wanderAngle) * z.speedWalk;
+        z.vy = Math.sin(z.wanderAngle) * z.speedWalk;
+      }
+
+      z.x += z.vx * dt;
+      z.y += z.vy * dt;
+      z.x = Math.max(12, Math.min(state.w - 12, z.x));
+      z.y = Math.max(48, Math.min(state.h - 48, z.y));
+
+      if (dist < p.r + z.r * 0.85) {
+        kill("Pegaram você");
+        return;
+      }
+    }
+
+    state.tensionNear = near;
+
+    // Rising pressure: more infected over time (scarce map gets meaner)
+    const targetCount = 2 + Math.floor(state.elapsed / 28);
+    if (state.infected.length < Math.min(6, targetCount)) {
+      spawnInfected(1);
+      beep({ freq: 70, dur: 0.4, type: "sine", gain: 0.02, slide: -15 });
+    }
+
+    // Sparse loot refresh far away
+    const aliveLoot = state.loot.filter((l) => !l.taken).length;
+    if (aliveLoot < 2 && state.elapsed - state.lastLootPulse > 12) {
+      state.lastLootPulse = state.elapsed;
+      spawnLoot(1);
+    }
+  }
+
   function update(dt) {
-    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 42);
-    if (state.flash > 0) state.flash = Math.max(0, state.flash - dt * 3.2);
+    if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 36);
+    if (state.flash > 0) state.flash = Math.max(0, state.flash - dt * 2.4);
+    state.heartbeat += dt;
 
     if (state.mode === "dying") {
       state.deathT += dt;
-      // Death beat: brief freeze + shake, then reveal
-      if (state.deathT > 0.55) finishDeath();
+      if (state.deathT > 0.7) finishDeath();
       return;
     }
 
     if (state.mode !== "play") return;
 
     state.elapsed += dt;
-    const display = state.elapsed.toFixed(1);
-    if (timerEl.textContent !== display) {
-      timerEl.textContent = display;
-      if (Math.floor(state.elapsed) !== Math.floor(state.elapsed - dt)) {
-        hud.classList.add("pulse");
-        setTimeout(() => hud.classList.remove("pulse"), 120);
-      }
+    const stamp = formatTime(state.elapsed);
+    if (timerEl.textContent !== stamp) timerEl.textContent = stamp;
+
+    updatePlayer(dt);
+    if (state.mode !== "play") return;
+    updateInfected(dt);
+    updateVitalsUI();
+
+    // Heartbeat when hungry or threat close
+    const pulseNeed =
+      state.player.hunger < 0.3 || state.tensionNear > 0.35 || state.player.noise > 0.7;
+    if (pulseNeed && Math.sin(state.heartbeat * (2.2 + state.tensionNear * 3)) > 0.97) {
+      beep({
+        freq: 48 + state.tensionNear * 30,
+        dur: 0.06,
+        type: "sine",
+        gain: 0.025 + state.tensionNear * 0.02,
+      });
     }
 
-    const p = state.player;
-    // Soft follow for tactile drag feel
-    const follow = 1 - Math.pow(0.001, dt);
-    p.x += (p.tx - p.x) * Math.min(1, follow * 14);
-    p.y += (p.ty - p.y) * Math.min(1, follow * 14);
-    p.x = Math.max(p.r, Math.min(state.w - p.r, p.x));
-    p.y = Math.max(p.r, Math.min(state.h - p.r, p.y));
-
-    difficultyTick();
-
-    for (let i = state.threats.length - 1; i >= 0; i--) {
-      const th = state.threats[i];
-      th.age += dt;
-      th.born = Math.min(1, th.age / 0.22); // spawn tension scale-in
-      th.x += th.vx * dt;
-      th.y += th.vy * dt;
-      th.rot += th.spin * dt;
-
-      // Slight homing late-game for rising pressure
-      if (state.elapsed > 8) {
-        const hx = p.x - th.x;
-        const hy = p.y - th.y;
-        const hl = Math.hypot(hx, hy) || 1;
-        const home = Math.min(35, (state.elapsed - 8) * 1.8);
-        th.vx += (hx / hl) * home * dt;
-        th.vy += (hy / hl) * home * dt;
-      }
-
-      const hitR = p.r + th.r * 0.72;
-      if (Math.hypot(th.x - p.x, th.y - p.y) < hitR) {
-        kill();
-        return;
-      }
-
-      // Cull far offscreen
-      if (
-        th.x < -80 ||
-        th.x > state.w + 80 ||
-        th.y < -80 ||
-        th.y > state.h + 80
-      ) {
-        state.threats.splice(i, 1);
-      }
+    if (ambience) {
+      const threat = Math.max(state.tensionNear, state.player.noise * 0.4);
+      ambience.g.gain.value = 0.01 + threat * 0.03;
+      ambience.filter.frequency.value = 240 + threat * 420;
     }
   }
 
-  function drawShard(th) {
-    const s = 0.35 + 0.65 * th.born;
-    const r = th.r * s;
+  function inVision(x, y) {
+    const d = Math.hypot(x - state.player.x, y - state.player.y);
+    // Vision shrinks when starving or panicked by noise
+    const v =
+      state.vision *
+      (0.78 + state.player.hunger * 0.22) *
+      (1 - state.player.noise * 0.12);
+    return d < v;
+  }
+
+  function drawWorld() {
+    const { w, h, player: p } = state;
+
+    // Mud ground
+    ctx.fillStyle = "#10110d";
+    ctx.fillRect(-30, -30, w + 60, h + 60);
+
+    const ground = ctx.createRadialGradient(p.x, p.y, 20, p.x, p.y, Math.max(w, h) * 0.7);
+    ground.addColorStop(0, "#1a1c14");
+    ground.addColorStop(1, "#0c0d0a");
+    ctx.fillStyle = ground;
+    ctx.fillRect(-30, -30, w + 60, h + 60);
+
+    // Faint terrain strokes
+    ctx.strokeStyle = "rgba(106, 110, 90, 0.06)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 8; i++) {
+      const y = ((i + 1) / 9) * h;
+      ctx.beginPath();
+      ctx.moveTo(0, y + Math.sin(i * 1.7) * 8);
+      ctx.lineTo(w, y + Math.cos(i * 1.1) * 10);
+      ctx.stroke();
+    }
+
+    // Ruins — only visible in radius (exploration)
+    for (const r of state.ruins) {
+      if (!inVision(r.x, r.y) && state.mode === "play") continue;
+      ctx.save();
+      ctx.translate(r.x, r.y);
+      ctx.rotate(r.rot);
+      ctx.globalAlpha = state.mode === "play" ? 0.55 : 0.2;
+      ctx.fillStyle = "#2a2d24";
+      ctx.fillRect(-r.w / 2, -r.h / 2, r.w, r.h);
+      ctx.strokeStyle = "rgba(168, 74, 46, 0.15)";
+      ctx.strokeRect(-r.w / 2, -r.h / 2, r.w, r.h);
+      ctx.restore();
+    }
+
+    // Loot — scarce glints
+    for (const item of state.loot) {
+      if (item.taken) continue;
+      if (!inVision(item.x, item.y) && state.mode === "play") continue;
+      item.pulse += 0.04;
+      const glow = 0.45 + Math.sin(item.pulse) * 0.2;
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle =
+        item.kind === "food"
+          ? `rgba(196, 163, 90, ${glow})`
+          : `rgba(138, 154, 110, ${glow})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, 9, 0, Math.PI * 2);
+      ctx.strokeStyle =
+        item.kind === "food"
+          ? "rgba(196, 163, 90, 0.2)"
+          : "rgba(138, 154, 110, 0.2)";
+      ctx.stroke();
+    }
+
+    // Infected
+    for (const z of state.infected) {
+      const visible =
+        state.mode !== "play" || inVision(z.x, z.y) || z.alert > 0.5;
+      if (!visible) continue;
+
+      const alpha = state.mode === "play" ? (inVision(z.x, z.y) ? 0.95 : 0.45) : 0.25;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(z.x, z.y);
+
+      // Shambling body
+      ctx.beginPath();
+      ctx.ellipse(0, 2, z.r * 0.7, z.r * 1.05, 0, 0, Math.PI * 2);
+      ctx.fillStyle = z.alert > 0.35 ? "#5c2416" : "#3a3d32";
+      ctx.fill();
+
+      // Head
+      ctx.beginPath();
+      ctx.arc(0, -z.r * 0.55, z.r * 0.42, 0, Math.PI * 2);
+      ctx.fillStyle = "#2e3028";
+      ctx.fill();
+
+      if (z.alert > 0.35) {
+        ctx.beginPath();
+        ctx.arc(-2, -z.r * 0.55, 1.4, 0, Math.PI * 2);
+        ctx.arc(2, -z.r * 0.55, 1.4, 0, Math.PI * 2);
+        ctx.fillStyle = "#a84a2e";
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // Player
+    if (state.mode === "play" || state.mode === "dying") {
+      const dying = state.mode === "dying";
+      const alpha = dying ? Math.max(0, 1 - state.deathT * 1.4) : 1;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(p.x, p.y);
+
+      // Soft body glow (your only warmth)
+      ctx.beginPath();
+      ctx.arc(0, 0, p.r * 2.4, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(216, 210, 196, 0.06)";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.ellipse(0, 1, p.r * 0.65, p.r * 1.05, 0, 0, Math.PI * 2);
+      ctx.fillStyle = "#d8d2c4";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(0, -p.r * 0.55, p.r * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Stillness ring when quiet
+      if (p.noise < 0.15 && p.dragging === false) {
+        ctx.beginPath();
+        ctx.arc(0, 0, p.r + 8, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(138, 154, 110, 0.25)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawFog() {
+    if (state.mode !== "play" && state.mode !== "dying") return;
+    const p = state.player;
+    const v =
+      state.vision *
+      (0.78 + p.hunger * 0.22) *
+      (1 - p.noise * 0.12) *
+      (state.mode === "dying" ? 1 + state.deathT * 0.5 : 1);
+
+    // Darkness outside vision — vulnerability
     ctx.save();
-    ctx.translate(th.x, th.y);
-    ctx.rotate(th.rot);
+    ctx.fillStyle = "rgba(8, 9, 7, 0.92)";
     ctx.beginPath();
-    ctx.moveTo(0, -r * 1.35);
-    ctx.lineTo(r * 0.95, r * 0.7);
-    ctx.lineTo(-r * 0.85, r * 0.85);
-    ctx.closePath();
-    const g = ctx.createLinearGradient(0, -r, 0, r);
-    g.addColorStop(0, "#e85a3a");
-    g.addColorStop(1, "#7a1f12");
-    ctx.fillStyle = g;
-    ctx.globalAlpha = 0.25 + 0.75 * th.born;
+    ctx.rect(-40, -40, state.w + 80, state.h + 80);
+    ctx.arc(p.x, p.y, v, 0, Math.PI * 2, true);
+    ctx.fill("evenodd");
+
+    // Soft vignette edge
+    const edge = ctx.createRadialGradient(p.x, p.y, v * 0.55, p.x, p.y, v);
+    edge.addColorStop(0, "rgba(8, 9, 7, 0)");
+    edge.addColorStop(1, "rgba(8, 9, 7, 0.55)");
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, v, 0, Math.PI * 2);
+    ctx.fillStyle = edge;
     ctx.fill();
     ctx.restore();
+  }
+
+  function drawMenuAtmosphere() {
+    const t = performance.now() / 1000;
+    for (let i = 0; i < 4; i++) {
+      const a = t * 0.15 + i * 1.6;
+      const x = state.w * 0.5 + Math.cos(a) * (state.w * 0.22 + i * 10);
+      const y = state.h * 0.48 + Math.sin(a * 0.9) * (state.h * 0.1);
+      ctx.beginPath();
+      ctx.ellipse(x, y, 7, 10, 0, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(58, 61, 50, 0.35)";
+      ctx.fill();
+    }
   }
 
   function draw() {
@@ -305,80 +663,21 @@
     ctx.save();
     ctx.translate(ox, oy);
 
-    // Atmosphere
-    ctx.fillStyle = "#0a0908";
-    ctx.fillRect(-20, -20, w + 40, h + 40);
-
-    const vg = ctx.createRadialGradient(w * 0.5, h * 0.55, 40, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
-    vg.addColorStop(0, "#14110e");
-    vg.addColorStop(1, "#0a0908");
-    ctx.fillStyle = vg;
-    ctx.fillRect(-20, -20, w + 40, h + 40);
-
-    // Soft arena ring during play
-    if (state.mode === "play" || state.mode === "dying") {
-      ctx.beginPath();
-      ctx.arc(w * 0.5, h * 0.55, Math.min(w, h) * 0.38, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(242, 235, 224, 0.04)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-
-    for (const th of state.threats) drawShard(th);
-
-    // Player
-    if (state.mode === "play" || state.mode === "dying") {
-      const p = state.player;
-      const dying = state.mode === "dying";
-      const pr = dying ? p.r * (1 + state.deathT * 0.8) : p.r;
-      const alpha = dying ? Math.max(0, 1 - state.deathT * 1.6) : 1;
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, pr * 2.2, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(242, 235, 224, 0.07)";
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, pr, 0, Math.PI * 2);
-      ctx.fillStyle = "#f2ebe0";
-      ctx.fill();
-
-      if (p.dragging && !dying) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, pr + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(242, 235, 224, 0.25)";
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // Menu ambient floating shards
     if (state.mode === "menu") {
-      const t = performance.now() / 1000;
-      for (let i = 0; i < 5; i++) {
-        const a = t * (0.2 + i * 0.05) + i * 1.7;
-        const x = w * 0.5 + Math.cos(a) * (w * 0.28 + i * 8);
-        const y = h * 0.42 + Math.sin(a * 1.3) * (h * 0.12 + i * 6);
-        drawShard({
-          x,
-          y,
-          r: 5 + i,
-          rot: a,
-          born: 0.35 + (i % 3) * 0.1,
-        });
-      }
+      ctx.fillStyle = "#0c0d0a";
+      ctx.fillRect(-20, -20, w + 40, h + 40);
+      drawMenuAtmosphere();
+    } else {
+      drawWorld();
+      drawFog();
     }
 
     ctx.restore();
 
-    // Hit flash
     if (state.flash > 0) {
-      ctx.fillStyle = `rgba(246, 240, 228, ${state.flash * 0.55})`;
+      ctx.fillStyle = `rgba(232, 226, 212, ${state.flash * 0.4})`;
       ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = `rgba(196, 60, 34, ${state.flash * 0.25})`;
+      ctx.fillStyle = `rgba(168, 74, 46, ${state.flash * 0.22})`;
       ctx.fillRect(0, 0, w, h);
     }
   }
@@ -393,7 +692,6 @@
     state.raf = requestAnimationFrame(loop);
   }
 
-  // Bindings
   btnPlay.addEventListener("click", startGame);
   btnRetry.addEventListener("click", startGame);
 
@@ -401,18 +699,12 @@
   window.addEventListener("pointermove", onPointerMove, { passive: false });
   window.addEventListener("pointerup", onPointerUp, { passive: false });
   window.addEventListener("pointercancel", onPointerUp, { passive: false });
-
-  // Touch fallbacks for older browsers
   canvas.addEventListener("touchstart", onPointerDown, { passive: false });
   window.addEventListener("touchmove", onPointerMove, { passive: false });
   window.addEventListener("touchend", onPointerUp, { passive: false });
 
-  window.addEventListener("resize", () => {
-    resize();
-    if (state.mode === "menu") resetPlayer();
-  });
+  window.addEventListener("resize", resize);
 
-  // Keyboard helper for desktop testing: Space to start / restart
   window.addEventListener("keydown", (e) => {
     if (e.code === "Space" || e.key === "Enter") {
       if (state.mode === "menu" || state.mode === "death") {
@@ -423,8 +715,7 @@
   });
 
   resize();
-  resetPlayer();
   showScreen("menu");
-  bestTimeEl.textContent = state.best.toFixed(1);
+  bestTimeEl.textContent = formatTime(state.best);
   state.raf = requestAnimationFrame(loop);
 })();

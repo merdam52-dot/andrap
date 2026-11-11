@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="theme-color" content="#0a0908" />
+  <meta name="theme-color" content="#0c0d0a" />
   <title>PRESA</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,21 +16,33 @@
     <canvas id="game" aria-label="Jogo PRESA"></canvas>
 
     <div id="hud" class="hud" hidden>
-      <span id="timer">0.0</span>
+      <div class="hud-top">
+        <span id="timer">0:00</span>
+      </div>
+      <div class="vitals" aria-hidden="true">
+        <div class="vital">
+          <span class="vital-label">Fome</span>
+          <div class="vital-track"><div id="hunger-bar" class="vital-fill hunger"></div></div>
+        </div>
+        <div class="vital">
+          <span class="vital-label">Ruído</span>
+          <div class="vital-track"><div id="noise-bar" class="vital-fill noise"></div></div>
+        </div>
+      </div>
     </div>
 
     <section id="screen-menu" class="screen active" aria-live="polite">
       <p class="brand">Minha Aposentadoria</p>
       <h1 class="title">PRESA</h1>
-      <p class="tagline">Arraste. Fuja. Aguente.</p>
-      <button type="button" id="btn-play" class="cta">Jogar</button>
+      <p class="tagline">Escasseia. Escute. Aguente.</p>
+      <button type="button" id="btn-play" class="cta">Entrar na zona</button>
     </section>
 
     <section id="screen-death" class="screen" hidden aria-live="assertive">
-      <p class="death-label">Acabou</p>
-      <p class="death-time"><span id="final-time">0.0</span>s</p>
-      <p class="death-best">Melhor <span id="best-time">0.0</span>s</p>
-      <button type="button" id="btn-retry" class="cta">De novo</button>
+      <p class="death-label" id="death-cause">Você não voltou</p>
+      <p class="death-time"><span id="final-time">0:00</span></p>
+      <p class="death-best">Mais tempo <span id="best-time">0:00</span></p>
+      <button type="button" id="btn-retry" class="cta">Tentar de novo</button>
     </section>
   </div>
   <script src="js/game.js"></script>
