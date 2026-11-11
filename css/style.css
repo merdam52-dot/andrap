@@ -69,6 +69,10 @@ body {
     max(1.25rem, env(safe-area-inset-bottom));
 }
 
+.hud[hidden] {
+  display: none !important;
+}
+
 .hud-top {
   text-align: center;
   font-family: var(--font-display);

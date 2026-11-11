@@ -667,6 +667,13 @@
       ctx.fillStyle = "#0c0d0a";
       ctx.fillRect(-20, -20, w + 40, h + 40);
       drawMenuAtmosphere();
+    } else if (state.mode === "death") {
+      // Frozen aftermath under the death beat — no live fog/HUD competition
+      ctx.fillStyle = "#0c0d0a";
+      ctx.fillRect(-20, -20, w + 40, h + 40);
+      drawWorld();
+      ctx.fillStyle = "rgba(8, 9, 7, 0.55)";
+      ctx.fillRect(-20, -20, w + 40, h + 40);
     } else {
       drawWorld();
       drawFog();
