@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0a0908" />
+  <title>PRESA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:opsz,wght@9..40,400;9..40,500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game" aria-label="Jogo PRESA"></canvas>
+
+    <div id="hud" class="hud" hidden>
+      <span id="timer">0.0</span>
+    </div>
+
+    <section id="screen-menu" class="screen active" aria-live="polite">
+      <p class="brand">Minha Aposentadoria</p>
+      <h1 class="title">PRESA</h1>
+      <p class="tagline">Arraste. Fuja. Aguente.</p>
+      <button type="button" id="btn-play" class="cta">Jogar</button>
+    </section>
+
+    <section id="screen-death" class="screen" hidden aria-live="assertive">
+      <p class="death-label">Acabou</p>
+      <p class="death-time"><span id="final-time">0.0</span>s</p>
+      <p class="death-best">Melhor <span id="best-time">0.0</span>s</p>
+      <button type="button" id="btn-retry" class="cta">De novo</button>
+    </section>
+  </div>
+  <script src="js/game.js"></script>
+</body>
+</html>
